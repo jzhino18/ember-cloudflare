@@ -133,6 +133,8 @@ import {
 import { avatarTokenOf, showAvatar, storeAvatar } from "./avatars";
 import type { BanProblem } from "./bans";
 import { BodyTooLarge, jsonBodyOf } from "./bodies";
+import { discordAction, finishDiscordConnection } from "./discord";
+import { DISCORD_CALLBACK_PATH } from "@ember/protocol/check-ins";
 import { botPage, changeBot, createBot, deleteBot, listBots, resetBotKey, showBot } from "./bots/accounts";
 import { botAction, exception, isBotPath, withoutBotKeys } from "./bots/api";
 import { ADDRESS_HEADER, AUTHORIZED_AT_HEADER, BANNED_HEADER, HUDDLE_HEADER, ROOM_HEADER, SESSION_HEADER, USER_HEADER } from "./chat-room";
@@ -1113,6 +1115,9 @@ async function connectToRoom(request: Request, env: Env, roomId: RoomId, huddle 
 
 /** What answers an API request, if one of the API's routes takes it. */
 function apiAction(request: Request, env: Env, pathname: string): (() => Response | Promise<Response>) | null {
+  // Check-in rooms and connecting Discord (discord.ts).
+  const discord = discordAction(request, env, pathname);
+  if (discord) return discord;
   if (pathname === "/api/bootstrap" && request.method === "GET") return () => bootstrap(request, env);
   if (pathname === "/api/first_run" && request.method === "POST") return () => firstRun(request, env);
   if (pathname === "/api/first_run/check" && request.method === "POST") return () => checkSetup(request, env);
@@ -1328,6 +1333,7 @@ async function route(request: Request, env: Env, pathname: string): Promise<Resp
   if (pathname === MEMBERFUL_SIGN_IN_PATH) return startMemberfulSignIn(request, env);
   // Signing in, which a banned IP address can't do, though it's a GET.
   if (pathname === MEMBERFUL_CALLBACK_PATH) return (await isFromBannedAddress(request, env)) ? tooManyRequests() : finishMemberfulSignIn(request, env);
+  if (pathname === DISCORD_CALLBACK_PATH) return (await isFromBannedAddress(request, env)) ? tooManyRequests() : finishDiscordConnection(request, env);
   if (isSetupPath(pathname)) return setupPage(request, env);
   if (pathname === SIGN_UP_PATH) return signUpPage(request, env);
   if (pathname === INVITATION_PATH) return invitationPage(request, env);

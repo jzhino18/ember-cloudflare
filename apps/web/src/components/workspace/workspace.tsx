@@ -1,4 +1,6 @@
 import { useCallback, useEffect, useEffectEvent, useLayoutEffect, useMemo, useReducer, useRef, useState, type MouseEvent, type ReactNode } from "react";
+import type { CheckInRoom } from "@ember/protocol/check-ins";
+import { takeDiscordFlash, useCheckInRooms } from "@/lib/check-ins";
 import { ASSISTANT_ID, searchOfQuery, startingInvolvement, type Account, type DirectRoom, type Favorites, type Me, type Room, type RoomId, type SidebarRoom, type User } from "@ember/protocol";
 import { CAMERAS_OFF, SCREENS_OFF } from "@ember/protocol/huddles";
 import { useFlash } from "@/components/flash";
@@ -37,6 +39,7 @@ import { Rail, type RailPage } from "./rail";
 import { RoomView, type RoomViewHandle } from "./room-view";
 import { OpenSearchContext, SearchBox, type SearchBoxOptions } from "./search-box";
 import { SettingsLayout, settingsSectionOf, type SettingsPlace } from "./settings-navigation";
+import { CheckInPage } from "./check-in";
 import { Sidebar } from "./sidebar";
 import { UpdatedNotice } from "./updated-notice";
 import { WelcomePage } from "./welcome-page";
@@ -202,7 +205,7 @@ function directIn(rooms: Room[], roomId: RoomId): DirectRoom | null {
  * kind to the room's own, and a DM's settings home, unless it's theirs. New direct message's goes home
  * too, under the dialog it opens, and a message's own address goes on to its permalink.
  */
-function redirectOf(route: Route, rooms: SidebarRoom[]): Redirect | null {
+function redirectOf(route: Route, rooms: SidebarRoom[], roomsToJoin: CheckInRoom[]): Redirect | null {
   switch (route.page) {
     case "home": {
       const room = lastRoomVisited(rooms);
@@ -218,7 +221,8 @@ function redirectOf(route: Route, rooms: SidebarRoom[]): Redirect | null {
       return room && room.kind !== "direct" ? { path: roomPath(room.id) } : ROOM_NOT_FOUND;
     }
     case "room":
-      return rooms.some((r) => r.id === route.roomId) ? null : ROOM_NOT_FOUND;
+      // A check-in room they aren't in shows its check-in page.
+      return rooms.some((r) => r.id === route.roomId) || roomsToJoin.some((r) => r.id === route.roomId) ? null : ROOM_NOT_FOUND;
     case "message":
       // Without looking, as the permalink checks the room.
       return { path: route.messageId ? messagePath(route.roomId, route.messageId) : roomPath(route.roomId) };
@@ -297,6 +301,8 @@ export function Workspace({ me, workspaceName, onAccountChanged, onSignOut, onSe
   const settings = useMemo<SettingsPlace | null>(() => section && { section, administrator }, [section, administrator]);
 
   const rooms = list?.rooms ?? null;
+  // Check-in rooms they aren't in, for Rooms to join and their check-in pages (check-in.tsx).
+  const roomsToJoin = useCheckInRooms(useMemo(() => rooms?.map((room) => room.id) ?? null, [rooms]));
   const invitation = list?.invitation ?? null;
   const favorites = list?.favorites ?? NO_FAVORITES;
   const sharedOrder = list?.sharedOrder ?? NO_ORDER;
@@ -413,7 +419,7 @@ export function Workspace({ me, workspaceName, onAccountChanged, onSignOut, onSe
   }, [visit]);
   // What connecting a Memberful account came to, as the address Memberful sent this browser back to says.
   useEffect(() => {
-    const message = takeMemberfulFlash();
+    const message = takeMemberfulFlash() ?? takeDiscordFlash();
     if (message) flash(message.kind, message.text);
   }, [flash]);
   // A session that's ended goes to sign in; anything else is an alert. Once another person's workspace
@@ -549,8 +555,8 @@ export function Workspace({ me, workspaceName, onAccountChanged, onSignOut, onSe
 
   // Where the address goes on to, once the list it goes by has come.
   const goingOn = useMemo(
-    () => (rooms && !askingAgain && !goneRoom && !unansweredHere ? redirectOf(route, rooms) : null),
-    [rooms, askingAgain, goneRoom, unansweredHere, route],
+    () => (rooms && roomsToJoin && !askingAgain && !goneRoom && !unansweredHere ? redirectOf(route, rooms, roomsToJoin) : null),
+    [rooms, roomsToJoin, askingAgain, goneRoom, unansweredHere, route],
   );
   // Before the page paints, so a page that only goes on to another doesn't show.
   useLayoutEffect(() => {
@@ -562,6 +568,7 @@ export function Workspace({ me, workspaceName, onAccountChanged, onSignOut, onSe
   }, [route, goingOn]);
 
   const room = route.page !== "room" || goingOn ? null : (goneRoom ?? rooms?.find((r) => r.id === route.roomId) ?? null);
+  const checkingIn = route.page === "room" && !room && !goingOn ? roomsToJoin?.find((r) => r.id === route.roomId) : undefined;
   // When the room shown was marked unread as of as it opened, for its timeline's New line, kept while it
   // stays open, though opening it reads it. Coming back to it with nothing new draws none.
   const [opened, setOpened] = useState<{ roomId: RoomId | null; newSince: string | null }>({ roomId: null, newSince: null });
@@ -707,6 +714,7 @@ export function Workspace({ me, workspaceName, onAccountChanged, onSignOut, onSe
       agents={agents}
       agentsOpen={agentsList !== null}
       onSelect={select}
+      roomsToJoin={roomsToJoin ?? undefined}
       onNewDirect={openNewDirect}
       onOpenAgents={openAgents}
       onStarred={starredRooms}
@@ -804,6 +812,7 @@ export function Workspace({ me, workspaceName, onAccountChanged, onSignOut, onSe
           return rarePage(({ DirectSettingsPage }) => (
             <DirectSettingsPage key={direct.id} room={direct} me={me} back={back} askForRoom={askForRoom} onMissing={missing} onFailed={failed} />
           ));
+        if (checkingIn) return <CheckInPage key={checkingIn.id} room={checkingIn} onFailed={failed} />;
         if (room)
           return (
             <RoomView

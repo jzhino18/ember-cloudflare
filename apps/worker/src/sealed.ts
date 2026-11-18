@@ -10,7 +10,7 @@ import { toBase64url, urlsafeDecode64 } from "./encoding";
 // under another SESSION_SECRET, or for something else, doesn't open.
 
 /** What a secret is kept for, whose key is derived for it alone. */
-export type SealedSecret = "resend-api-key" | "turnstile-secret-key" | "ai-gateway-token" | "sfu-app-secret" | "turn-key-api-token" | "app-token" | "app-sign-in" | "memberful-secrets";
+export type SealedSecret = "resend-api-key" | "turnstile-secret-key" | "ai-gateway-token" | "sfu-app-secret" | "turn-key-api-token" | "app-token" | "app-sign-in" | "memberful-secrets" | "discord-verifier";
 
 const VERSION = "v1";
 /** AES-GCM's nonce, 96 bits, as it's recommended. */

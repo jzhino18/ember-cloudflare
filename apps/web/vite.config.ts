@@ -133,6 +133,8 @@ export default defineConfig({
       "/api": { target: "http://localhost:8787", ws: true },
       "/webmanifest": "http://localhost:8787",
       "/qr_code": "http://localhost:8787",
+      // Where Discord sends the browser back after connecting (apps/worker/src/discord.ts).
+      "/auth/discord": "http://localhost:8787",
       "/account/turnstile_check": "http://localhost:8787",
       // Only avatars, so people's pages under /users, once they're built, stay the app's.
       "^/users/[^/]+/avatar": "http://localhost:8787",

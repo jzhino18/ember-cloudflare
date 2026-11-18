@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { CheckInSetting } from "./check-in";
 import type { RoomChanges, RoomIconName, RoomId, RoomSettings, User, UserId } from "@ember/protocol";
 import { Button } from "@/components/ui/button";
 import { useMounted } from "@/hooks/use-mounted";
@@ -180,6 +181,11 @@ export function RoomSettingsPage({ roomId, access, me, askForRoom, onMissing, on
           />
         )}
       </Panel>
+      {settings?.canAdminister && settings.room.kind === "closed" && (
+        <Panel>
+          <CheckInSetting roomId={roomId} onFailed={onFailed} />
+        </Panel>
+      )}
       {settings && !settings.canAdminister && settings.room.kind === "closed" && (
         <Panel>
           <Button type="button" variant="outline" disabled={busy} onClick={() => goOnceConfirmed(CONFIRM_LEAVE, leaveRoom)} className="max-w-full touch:h-11">

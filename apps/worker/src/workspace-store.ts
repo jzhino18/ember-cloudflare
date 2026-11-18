@@ -62,6 +62,8 @@ import {
 import type { AgentAccess, AgentProfile, AgentRoom } from "@ember/protocol/agents";
 import type { AppId } from "@ember/protocol/apps";
 import type { LiveHuddle } from "@ember/protocol/huddles";
+import { DISCORD_ISSUER } from "@ember/protocol/check-ins";
+import { checkInAllows, leaveCheckInRoomsIfUnlinked } from "./check-in-rule";
 import { statement, type Db, type Statement } from "./db";
 import type { StoredPicture } from "./files/pictures";
 import { INVITATION_TTL_SECONDS, invitationPayload, messagePayload, type PushPayload } from "./push/payload";
@@ -884,7 +886,7 @@ const START_MEMBERSHIP_CATCH_UP = `INSERT INTO membership_catch_ups (issuer, due
 const STAMP_MEMBERSHIPS = `UPDATE identities SET checked_at = ?3 WHERE issuer = ?1 AND subject IN (SELECT value FROM json_each(?2)) AND checked_at < ?3`;
 
 /** Whom an account elsewhere can be connected to: someone active, neither a guest nor a bot. */
-const CONNECTABLE = `users.status = ${ACTIVE} AND users.guest = 0 AND users.role <> ${BOT}`;
+export const CONNECTABLE = `users.status = ${ACTIVE} AND users.guest = 0 AND users.role <> ${BOT}`;
 
 /**
  * Keeps the state digest ?1, started at ?2, for connecting the account of person ?3 to one at issuer ?5,
@@ -1750,8 +1752,8 @@ const BETWEEN = `SELECT 1 FROM rooms WHERE id = ?1 AND kind = 'direct' AND (SELE
  * Whether someone is in a room, and whether a ban blocks the IP address they come from, in one go,
  * asked on every room socket's upgrade.
  */
-export const ROOM_ACCESS = `SELECT EXISTS (SELECT 1 FROM memberships WHERE room_id = ? AND user_id = ?) AS member,
-  EXISTS (SELECT 1 FROM bans WHERE ip_address = ?) AS banned`;
+export const ROOM_ACCESS = `SELECT EXISTS (SELECT 1 FROM memberships WHERE room_id = ?1 AND user_id = ?2) AND ${checkInAllows("?1", "?2")} AS member,
+  EXISTS (SELECT 1 FROM bans WHERE ip_address = ?3) AS banned`;
 
 /**
  * Marks a room unread, as of a message, for its members who aren't marked already, haven't hidden it,
@@ -2573,7 +2575,7 @@ const OPEN_ROOM_NAMED = `SELECT id, kind, name, icon FROM rooms WHERE kind = 'op
  * of them an AI agent only administrators' direct messages reach, which is in no room.
  */
 const GRANT_ROOM_TO_USERS = `INSERT INTO memberships (room_id, user_id, created_at, updated_at)
-  SELECT ?, id, ?, ? FROM users WHERE id IN (SELECT value FROM json_each(?)) AND agent_access IS NOT 'admin-dms'
+  SELECT ?1, id, ?2, ?3 FROM users WHERE id IN (SELECT value FROM json_each(?4)) AND agent_access IS NOT 'admin-dms' AND ${checkInAllows("?1", "users.id")}
   ON CONFLICT DO NOTHING RETURNING user_id`;
 
 /** Takes everyone but the people a JSON list names and anyone suspended whose membership it keeps (`KEPT_SUSPENDED_MEMBERSHIP`) out of a room, and answers whom. */
@@ -3133,7 +3135,8 @@ export class WorkspaceStore {
 
   /** A Memberful site anyone here, whatever their status, has an account at linked to them, the first if there are several, or null while nobody has. */
   async linkedSite(): Promise<string | null> {
-    const [linked] = await this.db.all<{ issuer: string }>(`SELECT issuer FROM identities LIMIT 1`);
+    // A linked Discord account is no Memberful site's (check-ins.ts).
+    const [linked] = await this.db.all<{ issuer: string }>(`SELECT issuer FROM identities WHERE issuer <> ? LIMIT 1`, DISCORD_ISSUER);
     return linked?.issuer ?? null;
   }
 
@@ -3389,6 +3392,8 @@ export class WorkspaceStore {
     const [queued] = await this.db.batch([
       statement(QUEUE_PERSON_SESSION_REVOCATIONS, SESSION_TAG_PREFIX, code, dueAt, userId),
       statement(UNLINK_ON_RESET, userId),
+      // Every socket of theirs closes already, so what these queue adds nothing to the answer.
+      ...leaveCheckInRoomsIfUnlinked(userId, code, dueAt),
       statement(`UPDATE users SET password_digest = ?, updated_at = ? WHERE id = ?`, passwordDigest, now, userId),
       statement(`DELETE FROM sessions WHERE user_id = ?`, userId),
       statement(`DELETE FROM push_subscriptions WHERE user_id = ?`, userId),
@@ -4541,16 +4546,20 @@ export class WorkspaceStore {
       await this.db.batch([change]);
       return false;
     }
-    const [queued] = await this.db.batch([
+    const leaving = leaveCheckInRoomsIfUnlinked(userId, ended.code, ended.dueAt);
+    const results = await this.db.batch([
       // Before their sessions go, which it finds their sockets by.
       statement(QUEUE_OTHER_SESSION_REVOCATIONS, SESSION_TAG_PREFIX, ended.code, ended.dueAt, userId, ended.kept),
       statement(`DELETE FROM sessions WHERE user_id = ? AND id <> ?`, userId, ended.kept),
       statement(`DELETE FROM push_subscriptions WHERE user_id = ? AND endpoint IS NOT ?`, userId, ended.pushEndpoint),
       statement(`DELETE FROM pending_identities WHERE user_id = ?`, userId),
       statement(UNLINK_ON_NEW_PASSWORD, userId, emailAddress),
+      ...leaving,
       change,
     ]);
-    return queued!.length > 0;
+    // Without Discord, this session's sockets in check-in rooms close too.
+    const leftCheckInRooms = results[results.length - 1 - leaving.length]!;
+    return results[0]!.length > 0 || leftCheckInRooms.length > 0;
   }
 
   /** What whoever has id `userId` signs in with, whatever their status, or null if nobody does. */

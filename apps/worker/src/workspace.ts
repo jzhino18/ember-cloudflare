@@ -113,6 +113,7 @@ import {
   type YourAppSignedOut,
 } from "@ember/protocol/apps";
 import type { MemberfulKeysChange, MemberfulSaved } from "@ember/protocol/memberful";
+import type { CheckInRoom, CheckInRule } from "@ember/protocol/check-ins";
 import type { Gateway } from "./assistant/gateway";
 import { modelsFileUrlOf, type KeptModelsFile, type KeptWorkersAiModels } from "./assistant/offered";
 import { providerMovesOf } from "./assistant/model-tests";
@@ -156,6 +157,8 @@ import { seal, unseal } from "./sealed";
 import { isToken } from "./secrets";
 import { SessionCache } from "./session-cache";
 import { CLOSE_REASONS, closeTooLarge, isTooLarge, MAX_WORKSPACE_FRAME_SIZE, RESERVED_CLOSE_CODES } from "./sockets";
+import { CheckIns, DISCORD_ROUND_TRIP_MS, type DiscordLink, type PendingDiscordConnection } from "./check-ins";
+import type { DiscordUser } from "./discord-api";
 import type { Transfer } from "./transfers";
 import type { TurnstileKeys } from "./turnstile";
 import { isViewing, type Viewing } from "./viewing";
@@ -1010,6 +1013,8 @@ const shownApp = (app: StoredApp, everyPicks: readonly AgentToolPicks[]): App =>
 export class Workspace extends DurableObject<Env> {
   private readonly db: Db;
   private readonly store: WorkspaceStore;
+  /** Check-in rooms' own tables (check-ins.ts). */
+  private readonly checkIns: CheckIns;
   private readonly outside: OutsideStore;
   private readonly sessions = new SessionCache<StoredSession>(CACHED_SESSIONS);
   /**
@@ -1068,6 +1073,7 @@ export class Workspace extends DurableObject<Env> {
     this.db = openDb(env, ctx.storage, "workspace");
     this.store = new WorkspaceStore(this.db);
     this.outside = new OutsideStore(this.db);
+    this.checkIns = new CheckIns(this.db);
     // The outbox can hold revocations with no alarm set for them: the Workspace can stop after saving a
     // change but before setting the alarm, and an alarm that keeps failing is given up. So it looks
     // whenever it starts, before answering anything. A failure is only logged; the next change that
@@ -4703,6 +4709,8 @@ export class Workspace extends DurableObject<Env> {
         ...(changes.icon !== undefined && { icon: changes.icon || null }),
       };
       if (!changes.name && !changes.kind && changes.icon === undefined) return changed;
+      // An open room takes in everyone, so it stops asking anyone to check in (check-ins.ts).
+      if (changes.kind === "open") await this.checkIns.turnOff(roomId);
       const now = Date.now();
       // As when signing out, until the database says it queued nothing.
       let queued = changes.kind === "closed";
@@ -4821,6 +4829,8 @@ export class Workspace extends DurableObject<Env> {
     const { marks, active, pushes, webhooks, asks } = await this.store.applyRoomEvents(roomId, events, viewerIds, pushing, guestSignIn(this.env));
     for (const [userId, at] of marks) this.tell([userId], at === null ? { type: "room.read", roomId } : { type: "room.unread", roomId, at });
     if (active) this.tell(active.userIds, { type: "room.active", roomId, at: active.at });
+    // In a check-in room, a mention gives its person three days to post (check-ins.ts).
+    if (await this.checkIns.noteMessages(roomId, events)) await this.scheduleDelivery();
     return { pushes, webhooks, asks };
   }
 
@@ -5125,6 +5135,7 @@ export class Workspace extends DurableObject<Env> {
    * the memberships due, and sets the alarm for whatever is due next.
    */
   override async alarm(): Promise<void> {
+    await this.removeUnansweredMentions();
     const revocations = await this.deliverRevocations((now) => this.store.dueRevocations(now, DELIVERIES_PER_RUN));
     const purges = await this.deliverPurges(DELIVERIES_PER_RUN - revocations);
     const reindexes = await this.deliverReindexes(DELIVERIES_PER_RUN - revocations - purges);
@@ -5296,8 +5307,8 @@ export class Workspace extends DurableObject<Env> {
 
   /** Sets the alarm for the outbox's next delivery due, if any is waiting. */
   private async scheduleDelivery(): Promise<void> {
-    const next = await this.store.nextDeliveryDue();
-    if (next !== null) await this.wakeAt(next);
+    const due = [await this.store.nextDeliveryDue(), await this.checkIns.nextRemovalDue()].filter((time) => time !== null);
+    if (due.length > 0) await this.wakeAt(Math.min(...due));
   }
 
   /**
@@ -5373,6 +5384,150 @@ export class Workspace extends DurableObject<Env> {
       await this.store.registerLegacyRoom(id, authors, new Date().toISOString());
     }
     if (unregistered.length > 0) await this.wakeAt(Date.now());
+  }
+
+  // Check-in rooms (check-ins.ts, discord.ts, docs/specs/discord-check-in-rooms.md): private rooms people
+  // let themselves into once they've connected Discord, where anyone mentioned has three days to post.
+
+  /** The Discord account the person `credentials` signs in has linked, by name, or null for none, and whether they have a password. Null without a valid session. */
+  async discordStatusOf(credentials: Credentials): Promise<{ name: string | null; hasPassword: boolean } | null> {
+    const user = await this.authenticate(credentials);
+    if (!user) return null;
+    const [name, signIn] = await Promise.all([this.checkIns.discordNameOf(user.id), this.store.signInOf(user.id)]);
+    return { name, hasPassword: Boolean(signIn?.passwordDigest) };
+  }
+
+  /**
+   * What connecting Discord checks first, as connecting Memberful does: whose account it is, and their
+   * password's digest ("" without one), for the Worker to check the password they gave against, counting
+   * against sign-in's limit for `ip`. "forbidden" for a guest, "connected" once they have Discord linked.
+   */
+  async discordConnectionCheck(credentials: Credentials, ip: string): Promise<{ userId: UserId; passwordDigest: string } | "limited" | "forbidden" | "connected" | null> {
+    const session = await this.session(credentials);
+    if (!session) return null;
+    if (session.guest) return "forbidden";
+    if ((await this.checkIns.discordNameOf(session.user.id)) !== null) return "connected";
+    const passwordDigest = (await this.store.signInOf(session.user.id))?.passwordDigest ?? "";
+    if (passwordDigest !== "" && !this.signInAttempts.attempt(ip)) return "limited";
+    return { userId: session.user.id, passwordDigest };
+  }
+
+  /** Keeps a trip to Discord for the callback to take within ten minutes. Whether it's kept. */
+  async startDiscordConnection(userId: UserId, passwordDigest: string, stateDigest: string, sealedVerifier: string, roomId: RoomId | null): Promise<boolean> {
+    const now = Date.now();
+    return this.checkIns.startConnection(stateDigest, userId, roomId, passwordDigest, sealedVerifier, now, now - DISCORD_ROUND_TRIP_MS);
+  }
+
+  /** Takes the trip to Discord whose state's digest is `stateDigest`, once, counting against sign-in's limit for `ip`. */
+  async takeDiscordConnection(ip: string, stateDigest: string): Promise<PendingDiscordConnection | "limited" | "expired"> {
+    if (!this.signInAttempts.attempt(ip)) return "limited";
+    return (await this.checkIns.takeConnection(stateDigest, Date.now() - DISCORD_ROUND_TRIP_MS)) ?? "expired";
+  }
+
+  /** Links `discord` to whoever started `pending`, and puts them in the check-in room it names, if any. */
+  async connectDiscord(pending: PendingDiscordConnection, discord: DiscordUser): Promise<DiscordLink> {
+    return this.oneAtATime(async () => {
+      const linked = await this.checkIns.link(pending.userId, pending.passwordDigest, discord, Date.now());
+      if (linked === "linked" && pending.roomId !== null) await this.letIntoCheckInRoom(pending.roomId, pending.userId);
+      return linked;
+    });
+  }
+
+  /** Unlinks the Discord account of the person `credentials` signs in, taking them out of every check-in room. */
+  async disconnectDiscord(credentials: Credentials): Promise<"disconnected" | "not connected" | null> {
+    const user = await this.authenticate(credentials);
+    if (!user) return null;
+    return this.closingSockets(async () => {
+      const now = Date.now();
+      let left: RoomId[] | null = null;
+      try {
+        left = await this.checkIns.disconnect(user.id, now);
+      } finally {
+        // As when signing out: the database may have saved it, and so queued it, though its answer was lost.
+        await this.revocationsQueued(now);
+      }
+      if (left === null) return "not connected";
+      for (const roomId of left) this.tell([user.id], { type: "room.gone", roomId });
+      return "disconnected";
+    });
+  }
+
+  /** The check-in rooms the person `credentials` signs in isn't in: none for a guest, who can't check in. */
+  async checkInRooms(credentials: Credentials): Promise<CheckInRoom[] | null> {
+    const session = await this.session(credentials);
+    if (!session) return null;
+    return session.guest ? [] : this.checkIns.roomsToJoin(session.user.id);
+  }
+
+  /** Puts the person `credentials` signs in in check-in room `roomId`, once they have Discord linked. */
+  async checkIn(credentials: Credentials, roomId: RoomId): Promise<"joined" | "in already" | "not connected" | "not found" | null> {
+    const session = await this.session(credentials);
+    if (!session) return null;
+    return this.oneAtATime(async () => {
+      if (!(await this.checkIns.isCheckInRoom(roomId))) return "not found";
+      if ((await this.checkIns.discordNameOf(session.user.id)) === null) return "not connected";
+      const joined = await this.letIntoCheckInRoom(roomId, session.user.id);
+      return joined === "refused" ? "not found" : joined;
+    });
+  }
+
+  /** What room `roomId`'s check-in rule says to the person `credentials` signs in: "not found" unless they're in it. */
+  async checkInRule(credentials: Credentials, roomId: RoomId): Promise<CheckInRule | "not found" | null> {
+    const user = await this.authenticate(credentials);
+    if (!user) return null;
+    if (!(await this.store.roomAccess(roomId, user.id, null)).member) return "not found";
+    return this.checkIns.ruleFor(roomId, user.id);
+  }
+
+  /**
+   * Turns check-in on or off for private room `roomId`, for whoever can change the room. Turning it on
+   * takes out everyone without Discord, so it takes Discord first ("not connected"). "open" for an open room.
+   */
+  async setCheckInRule(credentials: Credentials, roomId: RoomId, on: boolean): Promise<CheckInRule | "not found" | "forbidden" | "open" | "not connected" | null> {
+    const user = await this.authenticate(credentials);
+    if (!user) return null;
+    return this.closingSockets(async () => {
+      const found = await this.store.roomToChange(roomId, user.id);
+      if (!found) return "not found";
+      if (!found.canAdminister) return "forbidden";
+      if (found.room.kind !== "closed") return "open";
+      if (!on) {
+        await this.checkIns.turnOff(roomId);
+        return this.checkIns.ruleFor(roomId, user.id);
+      }
+      if ((await this.checkIns.discordNameOf(user.id)) === null) return "not connected";
+      const now = Date.now();
+      let removed: UserId[] = [];
+      try {
+        removed = await this.checkIns.turnOn(roomId, now);
+      } finally {
+        await this.revocationsQueued(now);
+      }
+      this.tell(removed, { type: "room.gone", roomId });
+      return this.checkIns.ruleFor(roomId, user.id);
+    });
+  }
+
+  /** Puts `userId` in check-in room `roomId` and adds it to their sidebars. Runs inside `oneAtATime`. */
+  private async letIntoCheckInRoom(roomId: RoomId, userId: UserId): Promise<"joined" | "in already" | "refused"> {
+    const joined = await this.checkIns.checkIn(roomId, userId, new Date().toISOString());
+    const found = joined === "joined" ? await this.store.roomToChange(roomId, userId) : null;
+    if (found) this.tell([userId], { type: "room.saved", room: found.room });
+    return joined;
+  }
+
+  /** Takes everyone whose mention in a check-in room has waited three full days out of that room, as the alarm comes. */
+  private async removeUnansweredMentions(): Promise<void> {
+    await this.closingSockets(async () => {
+      const now = Date.now();
+      let removed: Array<{ roomId: RoomId; userId: UserId }> = [];
+      try {
+        removed = await this.checkIns.removeUnanswered(now);
+      } finally {
+        if (removed.length > 0) await this.revocationsQueued(now);
+      }
+      for (const { roomId, userId } of removed) this.tell([userId], { type: "room.gone", roomId });
+    });
   }
 }
 

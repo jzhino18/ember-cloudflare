@@ -1,5 +1,6 @@
 import { useContext, useId, useMemo, type MouseEvent } from "react";
 import type { Favorites, LiveHuddle, Me, RoomId, SidebarRoom, UserId } from "@ember/protocol";
+import type { CheckInRoom } from "@ember/protocol/check-ins";
 import { ChatPlusIn, Headset, NavArrowRight, StarSolid } from "@/components/icons/iconoir";
 import { RoomIcon } from "@/components/icons/room-icon";
 import { useAccount } from "@/hooks/use-account";
@@ -11,6 +12,7 @@ import { inItsHuddle } from "@/lib/huddle-people";
 import { apart, inDirectOrder, inSidebarOrder, markedUnread, type DirectSidebarRoom } from "@/lib/room-list";
 import { cn } from "@/lib/utils";
 import { AgentBadge, useIsWithAgent } from "./agent-badge";
+import { RoomsToJoin } from "./check-in";
 import { opensNewDirect } from "./new-direct-dialog";
 import { UserAvatar } from "./user-avatar";
 
@@ -55,6 +57,8 @@ interface Props {
   onStarred: (favorites: Favorites) => void;
   /** Called with null when the session has expired. */
   onSessionChanged: (me: Me | null) => void;
+  /** The check-in rooms they aren't in, which Rooms to join lists (check-in.tsx). */
+  roomsToJoin?: CheckInRoom[];
 }
 
 /**
@@ -88,6 +92,7 @@ export function Sidebar({
   onOpenAgents,
   onStarred,
   onSessionChanged,
+  roomsToJoin = [],
 }: Props) {
   const { tagline } = useAccount();
   const { shared, directs } = useMemo(() => apart(unreadOnly ? rooms.filter((room) => markedUnread(room, currentRoomId)) : rooms), [rooms, unreadOnly, currentRoomId]);
@@ -197,6 +202,7 @@ export function Sidebar({
           />
         ))}
       </section>
+      {!unreadOnly && <RoomsToJoin rooms={roomsToJoin} currentRoomId={currentRoomId} rowClassName={ROW} onSelect={select} />}
       {empty && (
         <p className="px-[9px] text-[13px] text-muted-foreground">{unreadOnly ? "You’re all caught up. No unread conversations." : "No conversations found."}</p>
       )}

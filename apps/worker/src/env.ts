@@ -70,6 +70,12 @@ export interface Env {
    * set, Ember has only those.
    */
   MEMBERFUL_URL?: string;
+  /**
+   * A Discord application's OAuth2 client ID and secret (discord.com/developers/applications), which let
+   * people connect Discord and check in to check-in rooms (discord.ts). Without both, nobody can.
+   */
+  DISCORD_CLIENT_ID?: string;
+  DISCORD_CLIENT_SECRET?: string;
   /** The OAuth identifier of the Memberful site's custom app, a server-side one. */
   MEMBERFUL_CLIENT_ID?: string;
   /** That app's client secret, which never leaves the Worker. */

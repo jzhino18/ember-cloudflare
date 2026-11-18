@@ -32,6 +32,7 @@ import type { RoomAnswer } from "@/lib/room-list";
 import { cn } from "@/lib/utils";
 import { AnswerLevels } from "./answer-levels";
 import { ConversationNotifications } from "./conversation-notifications";
+import { DiscordConnection } from "./discord-connection";
 import { MemberfulConnection } from "./memberful-connection";
 import { InstallInstructions } from "./notification-help";
 import { HEADER_TEXT_BUTTON } from "./page-header";
@@ -387,6 +388,7 @@ export function ProfilePage({ me, rooms, askForRoom, onSignOut, onFailed }: Prop
             onFailed={onFailed}
           />
         )}
+        <DiscordConnection onFailed={onFailed} />
         {assistant && <AnswerLevels assistant={assistant} onChanged={setAssistant} onFailed={onFailed} />}
         {apps.length > 0 && <YourApps apps={apps} onChanged={setApps} onFailed={onFailed} />}
         {outsideAi && <YourOutsideAi connections={outsideAi} onChanged={setOutsideAi} onFailed={onFailed} />}

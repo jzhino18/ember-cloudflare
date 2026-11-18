@@ -27,6 +27,11 @@ EMBER_SETUP_PASSWORD=
 # MEMBERFUL_URL=
 # MEMBERFUL_CLIENT_ID=
 # MEMBERFUL_CLIENT_SECRET=
+# A Discord application's OAuth2 keys (discord.com/developers/applications, OAuth2), with which people
+# connect Discord and check in to check-in rooms. Add Ember's address followed by /auth/discord/callback
+# to the application's Redirects: on `pnpm dev` that's http://localhost:5173/auth/discord/callback.
+# DISCORD_CLIENT_ID=
+# DISCORD_CLIENT_SECRET=
 # What hearing the site's webhooks takes, at Ember's address followed by /webhooks/memberful, so that a
 # member whose membership lapses is signed out: the app's API key, and the webhook's secret key.
 # MEMBERFUL_API_KEY=

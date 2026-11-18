@@ -1,4 +1,5 @@
 import { useEffect, useEffectEvent, useImperativeHandle, useRef, type Ref } from "react";
+import { CheckInNotice } from "./check-in";
 import type { Favorites, Invitation, Involvement, Me } from "@ember/protocol";
 import { MainContent } from "@/components/main-content";
 import { useNameOf } from "@/hooks/use-directory";
@@ -127,6 +128,7 @@ export function RoomView({ room, messageId, threadId, replyId, invitation, onDis
         {/* Backgrounds run under a landscape phone's notch; the room's contents stay clear of it. */}
         <MainContent className="relative flex min-h-0 min-w-0 flex-col bg-background pr-[env(safe-area-inset-right)] max-md:pl-[env(safe-area-inset-left)]">
           <RoomNotice notice={state.notice} onDismiss={dismissNotice} />
+          {room.kind === "closed" && <CheckInNotice roomId={room.id} />}
           <MessageList
             roomName={name}
             direct={direct}
