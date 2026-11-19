@@ -118,6 +118,8 @@ function deploy(
     MEMBERFUL_CLIENT_SECRET: _secret,
     MEMBERFUL_API_KEY: _apiKey,
     MEMBERFUL_WEBHOOK_SECRET: _webhookSecret,
+    DISCORD_CLIENT_ID: _discordClient,
+    DISCORD_CLIENT_SECRET: _discordSecret,
     TURNSTILE_SITE_KEY: _siteKey,
     TURNSTILE_SECRET_KEY: _turnstileSecret,
     RESEND_API_KEY: _resendKey,
